@@ -1,0 +1,253 @@
+'''
+A Recurrent Neural Network (LSTM) implementation example using TensorFlow..
+Next word prediction after n_input words learned from text file.
+A story is automatically generated if the predicted word is fed back as input.
+
+Author: Rowel Atienza
+Project: https://github.com/roatienza/Deep-Learning-Experiments
+'''
+
+from __future__ import print_function
+
+import numpy as np
+import tensorflow as tf
+from tensorflow.contrib import rnn
+import random
+import collections
+import time
+import word2vec
+import io
+
+start_time = time.time()
+def elapsed(sec):
+    if sec<60:
+        return str(sec) + " sec"
+    elif sec<(60*60):
+        return str(sec/60) + " min"
+    else:
+        return str(sec/(60*60)) + " hr"
+
+
+# Target log path
+logs_path = '/tmp/tensorflow/rnn_words'
+writer = tf.summary.FileWriter(logs_path)
+
+# Text file containing words for training
+training_file = '/data/byall-phrase'
+testing_file = '/data/bytest'
+
+def read_data(fname, vocab_hash):
+    with io.open(fname, encoding='utf8') as f:
+        content = [ word for line in f.readlines() for word in line.split() ]
+        content = [x.strip() for x in content if vocab_hash.get(x)]
+        content = np.array(content)
+        return content
+
+vector_size=100
+def build_vectors():
+    word2vec.word2vec(training_file, './by1.bin', size=vector_size, verbose=True)
+    model = word2vec.load('./by1.bin')
+    return model
+model = build_vectors()
+
+#training_data = read_data(training_file, model.vocab_hash)
+training_data = read_data(testing_file, model.vocab_hash)
+testing_data = read_data(testing_file, model.vocab_hash)
+
+print("Loaded training and testing data...")
+for w in testing_data:
+    print (w,)
+print
+
+#vocab_size = len(model.vocab)
+#using vector_size instead of vocab_size
+
+# Parameters
+learning_rate = 0.001
+training_iters = 80000
+display_step = 1000
+n_input = 3
+#vector size is set above
+
+# number of units in RNN cell
+n_hidden = 512
+#n_hidden = 1024
+
+# tf Graph input
+#label_size = vocab_size #for onehot
+label_size = vector_size #for word embedding output
+#x = tf.placeholder("float", [None, n_input, 1])
+x = tf.placeholder("float", [None, n_input, vector_size])
+#y = tf.placeholder("float", [None, vector_size])
+y = tf.placeholder("float", [None, label_size]) 
+
+# RNN output node weights and biases
+weights = {
+    'out': tf.Variable(tf.random_normal([n_hidden, label_size]))
+}
+biases = {
+    'out': tf.Variable(tf.random_normal([label_size]))
+}
+
+def RNN(x, weights, biases):
+
+    #x is [None/batch_size, n_input, vector_size]
+    # Unstack to get a list of 'n_input' tensors of shape (batch_size, vector_size)
+    x = tf.unstack(x, n_input, 1)
+
+    # reshape to [1, n_input]
+    #x = tf.reshape(x, [-1, n_input])
+
+    # Generate a n_input-element sequence of inputs
+    # (eg. [had] [a] [general] -> [20] [6] [33])
+    #x = tf.split(x,n_input,1)
+
+    # 2-layer LSTM, each layer has n_hidden units.
+    # Average Accuracy= 95.20% at 50k iter
+    rnn_cell = rnn.MultiRNNCell([rnn.BasicLSTMCell(n_hidden),rnn.BasicLSTMCell(n_hidden),rnn.BasicLSTMCell(n_hidden)])
+
+    # 1-layer LSTM with n_hidden units but with lower accuracy.
+    # Average Accuracy= 90.60% 50k iter
+    # Uncomment line below to test but comment out the 2-layer rnn.MultiRNNCell above
+    # rnn_cell = rnn.BasicLSTMCell(n_hidden)
+
+    # generate prediction
+    outputs, states = rnn.static_rnn(rnn_cell, x, dtype=tf.float32)
+
+    # there are n_input outputs but
+    # we only want the last output
+    return tf.matmul(outputs[-1], weights['out']) + biases['out']
+
+pred = RNN(x, weights, biases)
+
+# Loss and optimizer for onehot
+#cost = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(logits=pred, labels=y))
+#optimizer = tf.train.RMSPropOptimizer(learning_rate=learning_rate).minimize(cost)
+
+# Loss and optimizer for wordvec output
+#cost = tf.reduce_mean(tf.losses.cosine_distance(predictions=pred, labels=y, dim=1))
+#cost = tf.abs(tf.losses.cosine_distance(predictions=pred, labels=y, dim=1))
+cost = tf.losses.mean_squared_error(predictions=pred, labels=y, weights=100.0)
+optimizer = tf.train.RMSPropOptimizer(learning_rate=learning_rate).minimize(cost)
+
+#Model evaluation for onehot
+#correct_pred = tf.equal(tf.argmax(pred,1), tf.argmax(y,1))
+#accuracy = tf.reduce_mean(tf.cast(correct_pred, tf.float32))
+
+#Model evaluation for wordvec
+#maybe we can get smarter about this,and have some minimum distance that we would consider correct
+correct_pred = tf.equal(pred, y)
+accuracy = tf.reduce_mean(tf.cast(correct_pred, tf.float32))
+
+
+# Initializing the variables
+init = tf.global_variables_initializer()
+
+saver = tf.train.Saver()  
+
+# Launch the graph
+with tf.Session() as session:
+    session.run(init)
+    step = 0
+    offset = random.randint(0,n_input+1)
+    end_offset = n_input + 1
+    acc_total = 0
+    loss_total = 0
+
+    writer.add_graph(session.graph)
+
+    while step < training_iters:
+        # Generate a minibatch. Add some randomness on selection process.
+        if offset > (len(training_data)-end_offset):
+            offset = random.randint(0, n_input+1)
+
+        #symbols_in_keys = [ [model[ str(training_data[i])]] for i in range(offset, offset+n_input) ]
+        symbols_in_keys = [ [model[ training_data[i]]] for i in range(offset, offset+n_input) ]
+        symbols_in_keys = np.reshape(np.array(symbols_in_keys), [-1, n_input, vector_size])
+
+        #for onehot labels
+        #symbols_out = np.zeros([label_size], dtype=float)
+        #symbols_out[dictionary[str(training_data[offset+n_input])]] = 1.0
+        #symbols_out = np.reshape(symbols_out_onehot,[1,-1])
+
+        #for word vector labels
+        symbols_out=model[training_data[offset+n_input]]
+        symbols_out=np.reshape(symbols_out,[-1, label_size])
+
+        _, acc, loss, onehot_pred = session.run([optimizer, accuracy, cost, pred], \
+                                                feed_dict={x: symbols_in_keys, y: symbols_out})
+        loss_total += loss
+        acc_total += acc
+        if (step+1) % display_step == 0:
+            print("Iter= " + str(step+1) + ", Average Loss= " + \
+                  "{:.6f}".format(loss_total/display_step) + ", Average Accuracy= " + \
+                  "{:.2f}%".format(100*acc_total/display_step))
+            acc_total = 0
+            loss_total = 0
+            symbols_in = [training_data[i] for i in range(offset, offset + n_input)]
+            symbols_out = training_data[offset + n_input]
+            #for onehot
+            #symbols_out_pred = reverse_dictionary[int(tf.argmax(onehot_pred, 1).eval())]
+            #for wordvector
+            print (onehot_pred.shape)
+            metrics = np.dot(model.vectors, np.reshape(onehot_pred,(vector_size)).T)
+            best = np.argsort(metrics)[-1]
+            symbols_out_pred = model.vocab[best]
+            print("%s - [%s] vs [%s]" % (symbols_in,symbols_out,symbols_out_pred))
+        step += 1
+        offset += (n_input+1)
+    print("Optimization Finished!")
+    print("Elapsed time: ", elapsed(time.time() - start_time))
+    print("Run on command line.")
+    print("\ttensorboard --logdir=%s" % (logs_path))
+    print("Point your web browser to: http://localhost:6006/")
+    print("saving model")
+    saver.save(session, 'by1-model')  
+    print("done saving model")
+    ''' 
+    while False:
+        print("testing model from memory")
+        prompt = "%s words: " % n_input
+        sentence = input(prompt)
+        sentence = sentence.strip()
+        words = sentence.split(' ')
+        if len(words) != n_input:
+            continue
+        #try:
+        if True:
+            symbols_in_keys = [model[str(words[i])] for i in range(len(words))]
+            for i in range(32):
+                keys = np.reshape(np.array(symbols_in_keys), [-1, n_input, vector_size])
+                onehot_pred = session.run(pred, feed_dict={x: keys})
+                onehot_pred_index = int(tf.argmax(onehot_pred, 1).eval())
+                #metrics = np.dot(model.vectors, vec_pred.T)
+                #best = np.argsort(metrics)[::-1][1:10+1]
+                #vocab_index = best[0]
+                pred_word = reverse_dictionary[onehot_pred_index]
+                sentence = "%s %s" % (sentence, pred_word)
+                symbols_in_keys = symbols_in_keys[1:]
+                symbols_in_keys.append(model[pred_word])
+            print(sentence)
+        #except:
+            #print("Word not in dictionary")
+    '''
+    offset = 0
+    sentence=[]
+    while offset < len(testing_data)-n_input:
+        next_3_words= [ testing_data[i] for i in range(offset, offset+n_input) ]
+        symbols_in_keys = [ [model[ testing_data[i]]] for i in range(offset, offset+n_input) ]
+        symbols_in_keys = np.reshape(np.array(symbols_in_keys), [-1, n_input, vector_size])
+        pred_word = session.run([pred], feed_dict={x: symbols_in_keys})
+        pred_word = np.reshape(pred_word, (vector_size))
+        #onehot_pred_index = int(tf.argmax(onehot_pred, 1).eval())
+        next_word = testing_data[offset+n_input]
+        metrics = np.dot(model.vectors, pred_word.T)
+        best = np.argsort(metrics)[-1]
+        next_word_pred=model.vocab[best]
+        if next_word == next_word_pred:
+              sentence.append(next_word_pred)
+        else:
+              sentence.append("(%s) [%s]" % (next_word_pred, next_word))
+        offset += 1
+        #offset += n_input+1
+    print (" ".join(sentence))
